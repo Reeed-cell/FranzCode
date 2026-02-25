@@ -1,383 +1,671 @@
+#!/usr/bin/env python3
 """
-╔══════════════════════════════════════════════╗
-║   FranzCode Interpreter  —  Stage 3 of 3    ║
-║   Tree-walking executor: visits every AST   ║
-║   node and runs the corresponding action.   ║
-╚══════════════════════════════════════════════╝
-
-AST flow:  ProgramNode (AST)  ──►  [ Interpreter ]  ──►  Program Output
+FranzCode Interpreter
+Supports: print, variables, arithmetic (+, -, *, /, %), if/elif/else, while loops, input(), comments.
 """
 
-from __future__ import annotations
-import random
-import re
 import sys
-import time
-import webbrowser
-from typing import Any, Dict, List, Optional
+import re
+import operator
+from enum import Enum
 
-from ast_nodes import *
+# ---------- Tokenization ----------
+class TokenType(Enum):
+    KEYWORD = 'KEYWORD'
+    IDENTIFIER = 'IDENTIFIER'
+    NUMBER = 'NUMBER'
+    STRING = 'STRING'
+    OPERATOR = 'OPERATOR'
+    LPAREN = 'LPAREN'
+    RPAREN = 'RPAREN'
+    LBRACE = 'LBRACE'
+    RBRACE = 'RBRACE'
+    ASSIGN = 'ASSIGN'
+    SEMICOLON = 'SEMICOLON'
+    NEWLINE = 'NEWLINE'
+    COMMENT = 'COMMENT'
+    EOF = 'EOF'
 
+class Token:
+    def __init__(self, type_, value, line, column):
+        self.type = type_
+        self.value = value
+        self.line = line
+        self.column = column
 
-# ─────────────────────────────────────────────────────────────
-#  Custom signals (used to implement BREAKOUT)
-# ─────────────────────────────────────────────────────────────
-class _BreakSignal(Exception):
-    """Raised by BREAKOUT to exit the nearest LOOP."""
+    def __repr__(self):
+        return f"Token({self.type}, {self.value!r}, line={self.line})"
+
+class Lexer:
+    keywords = {'if', 'elif', 'else', 'while', 'print', 'input'}
+
+    def __init__(self, source):
+        self.source = source
+        self.pos = 0
+        self.line = 1
+        self.col = 1
+        self.tokens = []
+
+    def tokenize(self):
+        while self.pos < len(self.source):
+            ch = self.source[self.pos]
+
+            # Skip whitespace (but not newlines)
+            if ch in ' \t':
+                self._advance()
+                continue
+
+            # Newlines
+            if ch == '\n':
+                self.tokens.append(Token(TokenType.NEWLINE, '\n', self.line, self.col))
+                self._advance()
+                self.line += 1
+                self.col = 1
+                continue
+
+            # Comments
+            if ch == '#':
+                start_col = self.col
+                comment = ''
+                while self.pos < len(self.source) and self.source[self.pos] != '\n':
+                    comment += self.source[self.pos]
+                    self._advance()
+                self.tokens.append(Token(TokenType.COMMENT, comment, self.line, start_col))
+                # Do not add NEWLINE here; it will be handled on next iteration
+                continue
+
+            # Strings (double or single quotes)
+            if ch in ('"', "'"):
+                quote = ch
+                start_col = self.col
+                self._advance()  # skip opening quote
+                string_val = ''
+                while self.pos < len(self.source) and self.source[self.pos] != quote:
+                    if self.source[self.pos] == '\\':
+                        self._advance()
+                        if self.pos < len(self.source):
+                            escape = self.source[self.pos]
+                            if escape == 'n':
+                                string_val += '\n'
+                            elif escape == 't':
+                                string_val += '\t'
+                            elif escape == '\\':
+                                string_val += '\\'
+                            elif escape == '"':
+                                string_val += '"'
+                            elif escape == "'":
+                                string_val += "'"
+                            else:
+                                string_val += escape
+                            self._advance()
+                    else:
+                        string_val += self.source[self.pos]
+                        self._advance()
+                if self.pos < len(self.source) and self.source[self.pos] == quote:
+                    self._advance()  # skip closing quote
+                else:
+                    raise SyntaxError(f"Unterminated string at line {self.line}, column {start_col}")
+                self.tokens.append(Token(TokenType.STRING, string_val, self.line, start_col))
+                continue
+
+            # Numbers
+            if ch.isdigit() or (ch == '.' and self.pos+1 < len(self.source) and self.source[self.pos+1].isdigit()):
+                start_col = self.col
+                num_str = ''
+                dot_count = 0
+                while self.pos < len(self.source) and (self.source[self.pos].isdigit() or self.source[self.pos] == '.'):
+                    if self.source[self.pos] == '.':
+                        dot_count += 1
+                        if dot_count > 1:
+                            raise SyntaxError(f"Invalid number at line {self.line}, column {start_col}")
+                    num_str += self.source[self.pos]
+                    self._advance()
+                if dot_count == 0:
+                    value = int(num_str)
+                else:
+                    value = float(num_str)
+                self.tokens.append(Token(TokenType.NUMBER, value, self.line, start_col))
+                continue
+
+            # Identifiers and keywords
+            if ch.isalpha() or ch == '_':
+                start_col = self.col
+                ident = ''
+                while self.pos < len(self.source) and (self.source[self.pos].isalnum() or self.source[self.pos] == '_'):
+                    ident += self.source[self.pos]
+                    self._advance()
+                if ident in self.keywords:
+                    self.tokens.append(Token(TokenType.KEYWORD, ident, self.line, start_col))
+                else:
+                    self.tokens.append(Token(TokenType.IDENTIFIER, ident, self.line, start_col))
+                continue
+
+            # Operators and punctuation
+            if ch == '=':
+                self.tokens.append(Token(TokenType.ASSIGN, '=', self.line, self.col))
+                self._advance()
+                continue
+            if ch == '(':
+                self.tokens.append(Token(TokenType.LPAREN, '(', self.line, self.col))
+                self._advance()
+                continue
+            if ch == ')':
+                self.tokens.append(Token(TokenType.RPAREN, ')', self.line, self.col))
+                self._advance()
+                continue
+            if ch == '{':
+                self.tokens.append(Token(TokenType.LBRACE, '{', self.line, self.col))
+                self._advance()
+                continue
+            if ch == '}':
+                self.tokens.append(Token(TokenType.RBRACE, '}', self.line, self.col))
+                self._advance()
+                continue
+            if ch == ';':
+                self.tokens.append(Token(TokenType.SEMICOLON, ';', self.line, self.col))
+                self._advance()
+                continue
+            # Multi-character operators: ==, !=, <=, >=, etc.
+            if ch == '=' and self.pos+1 < len(self.source) and self.source[self.pos+1] == '=':
+                self.tokens.append(Token(TokenType.OPERATOR, '==', self.line, self.col))
+                self._advance()
+                self._advance()
+                continue
+            if ch == '!' and self.pos+1 < len(self.source) and self.source[self.pos+1] == '=':
+                self.tokens.append(Token(TokenType.OPERATOR, '!=', self.line, self.col))
+                self._advance()
+                self._advance()
+                continue
+            if ch == '<' and self.pos+1 < len(self.source) and self.source[self.pos+1] == '=':
+                self.tokens.append(Token(TokenType.OPERATOR, '<=', self.line, self.col))
+                self._advance()
+                self._advance()
+                continue
+            if ch == '>' and self.pos+1 < len(self.source) and self.source[self.pos+1] == '=':
+                self.tokens.append(Token(TokenType.OPERATOR, '>=', self.line, self.col))
+                self._advance()
+                self._advance()
+                continue
+            # Single-character operators
+            if ch in '+-*/%<>!':
+                self.tokens.append(Token(TokenType.OPERATOR, ch, self.line, self.col))
+                self._advance()
+                continue
+
+            raise SyntaxError(f"Unexpected character '{ch}' at line {self.line}, column {self.col}")
+
+        self.tokens.append(Token(TokenType.EOF, '', self.line, self.col))
+        return self.tokens
+
+    def _advance(self):
+        self.pos += 1
+        self.col += 1
+
+# ---------- AST Nodes ----------
+class ASTNode:
     pass
 
-class RuntimeError_(Exception):
-    """FranzCode runtime error (renamed to avoid shadowing Python's)."""
-    pass
+class Program(ASTNode):
+    def __init__(self, statements):
+        self.statements = statements
 
+class Block(ASTNode):
+    def __init__(self, statements):
+        self.statements = statements
 
-# ─────────────────────────────────────────────────────────────
-#  Environment  —  variable scope
-# ─────────────────────────────────────────────────────────────
+class PrintStatement(ASTNode):
+    def __init__(self, expr):
+        self.expr = expr
+
+class IfStatement(ASTNode):
+    def __init__(self, condition, then_block, elif_blocks=None, else_block=None):
+        self.condition = condition
+        self.then_block = then_block
+        self.elif_blocks = elif_blocks if elif_blocks else []  # list of (condition, block)
+        self.else_block = else_block
+
+class WhileStatement(ASTNode):
+    def __init__(self, condition, block):
+        self.condition = condition
+        self.block = block
+
+class Assignment(ASTNode):
+    def __init__(self, name, expr):
+        self.name = name
+        self.expr = expr
+
+class BinaryOp(ASTNode):
+    def __init__(self, left, op, right):
+        self.left = left
+        self.op = op
+        self.right = right
+
+class UnaryOp(ASTNode):
+    def __init__(self, op, expr):
+        self.op = op
+        self.expr = expr
+
+class Number(ASTNode):
+    def __init__(self, value):
+        self.value = value
+
+class String(ASTNode):
+    def __init__(self, value):
+        self.value = value
+
+class Variable(ASTNode):
+    def __init__(self, name):
+        self.name = name
+
+class Input(ASTNode):
+    pass  # input() call
+
+# ---------- Parser ----------
+class Parser:
+    def __init__(self, tokens):
+        self.tokens = tokens
+        self.pos = 0
+        self.current_token = tokens[0] if tokens else None
+
+    def parse(self):
+        statements = []
+        while self.current_token.type != TokenType.EOF:
+            stmt = self.parse_statement()
+            if stmt is not None:
+                statements.append(stmt)
+            # Skip NEWLINEs and comments between statements
+            self.skip_ignorable()
+        return Program(statements)
+
+    def skip_ignorable(self):
+        while self.current_token.type in (TokenType.NEWLINE, TokenType.COMMENT):
+            self.advance()
+
+    def advance(self):
+        self.pos += 1
+        if self.pos < len(self.tokens):
+            self.current_token = self.tokens[self.pos]
+        else:
+            self.current_token = Token(TokenType.EOF, '', self.tokens[-1].line, self.tokens[-1].column)
+
+    def peek(self):
+        if self.pos + 1 < len(self.tokens):
+            return self.tokens[self.pos + 1]
+        return None
+
+    def match(self, *types):
+        if self.current_token.type in types:
+            tok = self.current_token
+            self.advance()
+            return tok
+        return None
+
+    def expect(self, *types, error_msg=None):
+        tok = self.current_token
+        if tok.type in types:
+            self.advance()
+            return tok
+        if error_msg is None:
+            error_msg = f"Expected {types}, got {tok.type} at line {tok.line}, column {tok.column}"
+        raise SyntaxError(error_msg)
+
+    def parse_statement(self):
+        # Skip leading newlines/comments
+        self.skip_ignorable()
+
+        if self.current_token.type == TokenType.EOF:
+            return None
+
+        # Print statement: print ( expression )
+        if self.current_token.type == TokenType.KEYWORD and self.current_token.value == 'print':
+            return self.parse_print()
+
+        # If statement
+        if self.current_token.type == TokenType.KEYWORD and self.current_token.value == 'if':
+            return self.parse_if()
+
+        # While loop
+        if self.current_token.type == TokenType.KEYWORD and self.current_token.value == 'while':
+            return self.parse_while()
+
+        # Assignment: identifier = expression
+        if self.current_token.type == TokenType.IDENTIFIER and self.peek() and self.peek().type == TokenType.ASSIGN:
+            return self.parse_assignment()
+
+        # Expression statement (could be just a number or string, but usually not standalone; maybe input call)
+        # Actually, input() can be standalone? It would read and discard. We'll allow expression statements.
+        expr = self.parse_expression()
+        if expr:
+            # Optionally expect semicolon? FranzCode may not require semicolons. We'll ignore them.
+            self.match(TokenType.SEMICOLON)
+            return expr
+        else:
+            # If we can't parse an expression, maybe it's just a newline/comment
+            self.advance()  # skip whatever
+            return None
+
+    def parse_print(self):
+        self.advance()  # consume 'print'
+        # Expect '('
+        self.expect(TokenType.LPAREN, error_msg="Expected '(' after 'print'")
+        expr = self.parse_expression()
+        self.expect(TokenType.RPAREN, error_msg="Expected ')' after print expression")
+        # Optionally semicolon
+        self.match(TokenType.SEMICOLON)
+        return PrintStatement(expr)
+
+    def parse_if(self):
+        self.advance()  # consume 'if'
+        # Condition in parentheses
+        self.expect(TokenType.LPAREN)
+        condition = self.parse_expression()
+        self.expect(TokenType.RPAREN)
+        # Then block
+        then_block = self.parse_block()
+        # Elif blocks
+        elif_blocks = []
+        while self.current_token.type == TokenType.KEYWORD and self.current_token.value == 'elif':
+            self.advance()
+            self.expect(TokenType.LPAREN)
+            elif_cond = self.parse_expression()
+            self.expect(TokenType.RPAREN)
+            elif_block = self.parse_block()
+            elif_blocks.append((elif_cond, elif_block))
+        # Else block
+        else_block = None
+        if self.current_token.type == TokenType.KEYWORD and self.current_token.value == 'else':
+            self.advance()
+            else_block = self.parse_block()
+        return IfStatement(condition, then_block, elif_blocks, else_block)
+
+    def parse_while(self):
+        self.advance()  # consume 'while'
+        self.expect(TokenType.LPAREN)
+        condition = self.parse_expression()
+        self.expect(TokenType.RPAREN)
+        block = self.parse_block()
+        return WhileStatement(condition, block)
+
+    def parse_block(self):
+        # A block can be a single statement without braces, or multiple statements in braces.
+        if self.current_token.type == TokenType.LBRACE:
+            self.advance()
+            statements = []
+            while self.current_token.type != TokenType.RBRACE and self.current_token.type != TokenType.EOF:
+                self.skip_ignorable()
+                stmt = self.parse_statement()
+                if stmt is not None:
+                    statements.append(stmt)
+                self.skip_ignorable()
+            self.expect(TokenType.RBRACE, error_msg="Expected '}' to close block")
+            return Block(statements)
+        else:
+            # Single statement (not a block)
+            stmt = self.parse_statement()
+            if stmt is None:
+                raise SyntaxError("Expected a statement inside block")
+            return Block([stmt])
+
+    def parse_assignment(self):
+        var_token = self.expect(TokenType.IDENTIFIER)
+        self.expect(TokenType.ASSIGN)
+        expr = self.parse_expression()
+        self.match(TokenType.SEMICOLON)
+        return Assignment(var_token.value, expr)
+
+    def parse_expression(self):
+        return self.parse_logical_or()
+
+    def parse_logical_or(self):
+        expr = self.parse_logical_and()
+        while self.current_token.type == TokenType.OPERATOR and self.current_token.value == 'or':
+            op = self.current_token.value
+            self.advance()
+            right = self.parse_logical_and()
+            expr = BinaryOp(expr, op, right)
+        return expr
+
+    def parse_logical_and(self):
+        expr = self.parse_equality()
+        while self.current_token.type == TokenType.OPERATOR and self.current_token.value == 'and':
+            op = self.current_token.value
+            self.advance()
+            right = self.parse_equality()
+            expr = BinaryOp(expr, op, right)
+        return expr
+
+    def parse_equality(self):
+        expr = self.parse_comparison()
+        while self.current_token.type == TokenType.OPERATOR and self.current_token.value in ('==', '!='):
+            op = self.current_token.value
+            self.advance()
+            right = self.parse_comparison()
+            expr = BinaryOp(expr, op, right)
+        return expr
+
+    def parse_comparison(self):
+        expr = self.parse_addition()
+        while self.current_token.type == TokenType.OPERATOR and self.current_token.value in ('<', '>', '<=', '>='):
+            op = self.current_token.value
+            self.advance()
+            right = self.parse_addition()
+            expr = BinaryOp(expr, op, right)
+        return expr
+
+    def parse_addition(self):
+        expr = self.parse_multiplication()
+        while self.current_token.type == TokenType.OPERATOR and self.current_token.value in ('+', '-'):
+            op = self.current_token.value
+            self.advance()
+            right = self.parse_multiplication()
+            expr = BinaryOp(expr, op, right)
+        return expr
+
+    def parse_multiplication(self):
+        expr = self.parse_unary()
+        while self.current_token.type == TokenType.OPERATOR and self.current_token.value in ('*', '/', '%'):
+            op = self.current_token.value
+            self.advance()
+            right = self.parse_unary()
+            expr = BinaryOp(expr, op, right)
+        return expr
+
+    def parse_unary(self):
+        if self.current_token.type == TokenType.OPERATOR and self.current_token.value in ('+', '-', '!'):
+            op = self.current_token.value
+            self.advance()
+            expr = self.parse_unary()
+            return UnaryOp(op, expr)
+        return self.parse_primary()
+
+    def parse_primary(self):
+        tok = self.current_token
+        if tok.type == TokenType.NUMBER:
+            self.advance()
+            return Number(tok.value)
+        if tok.type == TokenType.STRING:
+            self.advance()
+            return String(tok.value)
+        if tok.type == TokenType.IDENTIFIER:
+            self.advance()
+            return Variable(tok.value)
+        if tok.type == TokenType.KEYWORD and tok.value == 'input':
+            self.advance()
+            self.expect(TokenType.LPAREN)
+            self.expect(TokenType.RPAREN)
+            return Input()
+        if tok.type == TokenType.LPAREN:
+            self.advance()
+            expr = self.parse_expression()
+            self.expect(TokenType.RPAREN)
+            return expr
+        raise SyntaxError(f"Unexpected token {tok.type} at line {tok.line}, column {tok.column}")
+
+# ---------- Evaluator ----------
 class Environment:
-    """
-    Stores variables in a nested scope chain.
-    Inner scopes shadow outer ones.
-    """
+    def __init__(self, parent=None):
+        self.vars = {}
+        self.parent = parent
 
-    def __init__(self, parent: Optional[Environment] = None):
-        self._vars:  Dict[str, Any] = {}
-        self.parent: Optional[Environment] = parent
-
-    def get(self, name: str, line: int = 0) -> Any:
-        if name in self._vars:
-            return self._vars[name]
+    def get(self, name):
+        if name in self.vars:
+            return self.vars[name]
         if self.parent:
-            return self.parent.get(name, line)
-        raise RuntimeError_(
-            f"[Line {line}] Variable '{name}' is not defined. "
-            f"Use SET {name} TO <value> first."
-        )
+            return self.parent.get(name)
+        raise NameError(f"Variable '{name}' is not defined")
 
-    def set(self, name: str, value: Any):
-        """Set in current scope."""
-        self._vars[name] = value
+    def set(self, name, value):
+        self.vars[name] = value
 
-    def set_existing(self, name: str, value: Any, line: int = 0):
-        """Modify an already-existing variable (searches up the chain)."""
-        if name in self._vars:
-            self._vars[name] = value
-            return
-        if self.parent:
-            self.parent.set_existing(name, value, line)
-            return
-        raise RuntimeError_(
-            f"[Line {line}] Variable '{name}' is not defined. "
-            f"Cannot modify it before setting it."
-        )
+    def set_global(self, name, value):
+        # For assignments that should go to global scope (like in blocks)
+        if self.parent is None:
+            self.vars[name] = value
+        else:
+            self.parent.set_global(name, value)
 
-    def all_vars(self) -> Dict[str, Any]:
-        """Flatten the full scope chain for DUMP."""
-        merged = {}
-        if self.parent:
-            merged.update(self.parent.all_vars())
-        merged.update(self._vars)
-        return merged
-
-
-# ─────────────────────────────────────────────────────────────
-#  Interpreter
-# ─────────────────────────────────────────────────────────────
 class Interpreter:
-    """
-    Walks the AST produced by the Parser and executes each node.
-
-    Usage:
-        interp = Interpreter()
-        interp.run(program_node)
-    """
-
-    # Troll pools
-    _MYSTERY_POOL = [
-        "🎉 A wild treasure appeared!",
-        "🐸 Ribbit. Just... ribbit.",
-        "Nothing happened. Or did it? 🤔",
-        "⚠️  WARNING: Your keyboard is haunted.",
-        "🦆 Quack.",
-        "The answer is 42.",
-        "404: Mystery not found.",
-        "Yes.",
-        "No.",
-        "Maybe.",
-        "¯\\_(ツ)_/¯",
-        "Potato.",
-        "🌮 Taco appeared out of nowhere.",
-        "ERROR: Too much fun detected.",
-        "🕵️ Someone is watching. Probably not.",
-    ]
-    _POGGERS_POOL = [
-        "🎊 POGGERS! LETS GOOO!",
-        "W + ratio + you're built different!",
-        "🔥 ABSOLUTELY FIRE 🔥",
-        "NO CAP THAT WAS WILD 🐐",
-        "SHEEEESH 😤",
-        "This is the way. 💪",
-        "GOATED WITH THE SAUCE 🐐",
-    ]
-
     def __init__(self):
         self.global_env = Environment()
-        # Seed some built-ins
-        self.global_env.set("LOOPCOUNT", 0)
-        self.global_env.set("TRUE",  True)
-        self.global_env.set("FALSE", False)
-        self.global_env.set("PI",    3.141592653589793)
-        self.global_env.set("TAU",   6.283185307179586)
 
-    # ── Debug logging (for this session only) ───────────────────
-    def _debug_log(self, hypothesis_id: str, message: str, data: dict | None = None, run_id: str = "pre-fix"):
-        """Lightweight NDJSON logger for interpreter debugging."""
-        # region agent log
-        import json, time
-        payload = {
-            "sessionId": "40a6d3",
-            "runId": run_id,
-            "hypothesisId": hypothesis_id,
-            "location": "interpreter.py",
-            "message": message,
-            "data": data or {},
-            "timestamp": int(time.time() * 1000),
-        }
-        try:
-            with open("debug-40a6d3.log", "a", encoding="utf-8") as _f:
-                _f.write(json.dumps(payload) + "\n")
-        except OSError:
-            # Logging must never break execution.
-            pass
-        # endregion
-
-    # ── Public entry ──────────────────────────────────────────
-    def run(self, node: ProgramNode):
-        self._debug_log("H6", "run_start", {"stmt_count": len(node.body)})
-        self._exec_block(node.body, self.global_env)
-        self._debug_log("H6", "run_end", {})
-
-    # ── Block execution ───────────────────────────────────────
-    def _exec_block(self, stmts: List[Node], env: Environment):
-        for idx, stmt in enumerate(stmts):
-            self._debug_log("H7", "exec_block_stmt", {
-                "index": idx,
-                "node_type": type(stmt).__name__,
-            })
-            self._exec(stmt, env)
-
-    # ── Node dispatcher ───────────────────────────────────────
-    def _exec(self, node: Node, env: Environment):
-        method_name = f"_exec_{type(node).__name__}"
-        method      = getattr(self, method_name, None)
-        if method is None:
-            raise RuntimeError_(
-                f"[Line {node.line}] Interpreter bug — "
-                f"no handler for node type {type(node).__name__}"
-            )
-        return method(node, env)
-
-    def _eval(self, node: Node, env: Environment) -> Any:
-        method_name = f"_eval_{type(node).__name__}"
-        method      = getattr(self, method_name, None)
-        if method is None:
-            raise RuntimeError_(
-                f"[Line {node.line}] Interpreter bug — "
-                f"no evaluator for node type {type(node).__name__}"
-            )
-        return method(node, env)
-
-    # ─── Expression evaluators ────────────────────────────────
-
-    def _eval_NumberNode(self, node: NumberNode, env) -> float | int:
-        return node.value
-
-    def _eval_StringNode(self, node: StringNode, env) -> str:
-        """Evaluate a string, resolving {variable} interpolations."""
-        def replacer(m):
-            vname = m.group(1)
-            try:
-                val = env.get(vname)
-                # Pretty-print floats that are whole numbers
-                if isinstance(val, float) and val.is_integer():
-                    return str(int(val))
-                return str(val)
-            except RuntimeError_:
-                return f"{{{vname}}}"
-        return re.sub(r"\{(\w+)\}", replacer, node.value)
-
-    def _eval_IdentNode(self, node: IdentNode, env) -> Any:
-        return env.get(node.name, node.line)
-
-    def _eval_BinOpNode(self, node: BinOpNode, env) -> Any:
-        left  = self._eval(node.left,  env)
-        right = self._eval(node.right, env)
-        try:
-            if node.op == "+":  return left + right
-            if node.op == "-":  return left - right
-            if node.op == "*":  return left * right
-            if node.op == "/":
-                if right == 0:
-                    raise RuntimeError_(
-                        f"[Line {node.line}] Division by zero! Franz says no."
-                    )
+    def eval(self, node, env=None):
+        if env is None:
+            env = self.global_env
+        if isinstance(node, Program):
+            result = None
+            for stmt in node.statements:
+                result = self.eval(stmt, env)
+            return result
+        elif isinstance(node, Block):
+            # Blocks create a new local environment (nested scope)
+            new_env = Environment(env)
+            result = None
+            for stmt in node.statements:
+                result = self.eval(stmt, new_env)
+            return result
+        elif isinstance(node, PrintStatement):
+            value = self.eval(node.expr, env)
+            print(value)
+            return None
+        elif isinstance(node, IfStatement):
+            cond_val = self.eval(node.condition, env)
+            if self.is_truthy(cond_val):
+                return self.eval(node.then_block, env)
+            for elif_cond, elif_block in node.elif_blocks:
+                if self.is_truthy(self.eval(elif_cond, env)):
+                    return self.eval(elif_block, env)
+            if node.else_block:
+                return self.eval(node.else_block, env)
+            return None
+        elif isinstance(node, WhileStatement):
+            while self.is_truthy(self.eval(node.condition, env)):
+                self.eval(node.block, env)
+            return None
+        elif isinstance(node, Assignment):
+            value = self.eval(node.expr, env)
+            # Assignment always goes to current scope (or global if not exists?) In FranzCode, assignment creates or updates in current scope.
+            env.set(node.name, value)
+            return None
+        elif isinstance(node, BinaryOp):
+            left = self.eval(node.left, env)
+            right = self.eval(node.right, env)
+            if node.op == '+':
+                # Handle string concatenation
+                if isinstance(left, str) or isinstance(right, str):
+                    return str(left) + str(right)
+                return left + right
+            elif node.op == '-':
+                return left - right
+            elif node.op == '*':
+                return left * right
+            elif node.op == '/':
+                # Division returns float
                 return left / right
-            if node.op == "%":  return left % right
-            if node.op == "**": return left ** right
-        except TypeError as e:
-            raise RuntimeError_(
-                f"[Line {node.line}] Type error in '{node.op}' operation: {e}"
-            )
-
-    def _eval_UnaryOpNode(self, node: UnaryOpNode, env) -> Any:
-        val = self._eval(node.operand, env)
-        if node.op == "-":   return -val
-        if node.op == "not": return not val
-
-    def _eval_CompareNode(self, node: CompareNode, env) -> bool:
-        left  = self._eval(node.left,  env)
-        right = self._eval(node.right, env)
-        if node.op == "==": return left == right
-        if node.op == "!=": return left != right
-        if node.op == ">":  return left >  right
-        if node.op == "<":  return left <  right
-        if node.op == ">=": return left >= right
-        if node.op == "<=": return left <= right
-
-    def _eval_LogicNode(self, node: LogicNode, env) -> bool:
-        left = self._eval(node.left, env)
-        # Short-circuit evaluation
-        if node.op == "and": return bool(left) and bool(self._eval(node.right, env))
-        if node.op == "or":  return bool(left) or  bool(self._eval(node.right, env))
-
-    # ─── Statement executors ──────────────────────────────────
-
-    def _fmt(self, val: Any) -> str:
-        """Pretty-format a value for printing."""
-        if isinstance(val, float) and val.is_integer():
-            return str(int(val))
-        if isinstance(val, bool):
-            return "TRUE" if val else "FALSE"
-        return str(val)
-
-    # ── Output ────────────────────────────────────────────────
-    def _exec_SayNode(self, node: SayNode, env):
-        print(self._fmt(self._eval(node.expr, env)))
-
-    def _exec_YellNode(self, node: YellNode, env):
-        print(self._fmt(self._eval(node.expr, env)).upper() + "!!!")
-
-    def _exec_WhisperNode(self, node: WhisperNode, env):
-        print(self._fmt(self._eval(node.expr, env)).lower() + "...")
-
-    def _exec_ConfuseNode(self, node: ConfuseNode, env):
-        val   = list(self._fmt(self._eval(node.expr, env)))
-        random.shuffle(val)
-        print("".join(val))
-
-    def _exec_RepeatNode(self, node: RepeatNode, env):
-        val   = self._fmt(self._eval(node.expr,  env))
-        count = int(self._eval(node.count, env))
-        print((val + " ") * count)
-
-    def _exec_YeetNode(self, node: YeetNode, env):
-        val = self._fmt(self._eval(node.expr, env))
-        print(f"YEET ➜ {val} 🚀")
-
-    # ── Variables ─────────────────────────────────────────────
-    def _exec_SetNode(self, node: SetNode, env):
-        env.set(node.name, self._eval(node.value, env))
-
-    def _exec_ModifyNode(self, node: ModifyNode, env):
-        current = env.get(node.name, node.line)
-        amount  = self._eval(node.amount, env)
-        if   node.op == "ADD": result = current + amount
-        elif node.op == "SUB": result = current - amount
-        elif node.op == "MUL": result = current * amount
-        elif node.op == "DIV":
-            if amount == 0:
-                raise RuntimeError_(f"[Line {node.line}] Division by zero in DIV.")
-            result = current / amount
-        env.set_existing(node.name, result, node.line)
-
-    # ── Logic ─────────────────────────────────────────────────
-    def _exec_IfNode(self, node: IfNode, env):
-        cond = self._eval(node.condition, env)
-        # Child scope so IF variables don't leak out
-        child = Environment(parent=env)
-        if cond:
-            self._exec_block(node.then_body, child)
+            elif node.op == '%':
+                return left % right
+            elif node.op == '==':
+                return left == right
+            elif node.op == '!=':
+                return left != right
+            elif node.op == '<':
+                return left < right
+            elif node.op == '>':
+                return left > right
+            elif node.op == '<=':
+                return left <= right
+            elif node.op == '>=':
+                return left >= right
+            elif node.op == 'and':
+                return self.is_truthy(left) and self.is_truthy(right)
+            elif node.op == 'or':
+                return self.is_truthy(left) or self.is_truthy(right)
+            else:
+                raise RuntimeError(f"Unknown operator {node.op}")
+        elif isinstance(node, UnaryOp):
+            expr = self.eval(node.expr, env)
+            if node.op == '+':
+                return +expr
+            elif node.op == '-':
+                return -expr
+            elif node.op == '!':
+                return not self.is_truthy(expr)
+            else:
+                raise RuntimeError(f"Unknown unary operator {node.op}")
+        elif isinstance(node, Number):
+            return node.value
+        elif isinstance(node, String):
+            return node.value
+        elif isinstance(node, Variable):
+            return env.get(node.name)
+        elif isinstance(node, Input):
+            return input()
         else:
-            self._exec_block(node.else_body, child)
+            raise RuntimeError(f"Unknown node type {type(node)}")
 
-    # ── Loops ─────────────────────────────────────────────────
-    def _exec_LoopNode(self, node: LoopNode, env):
-        count = int(self._eval(node.count, env))
-        self._debug_log("H8", "loop_start", {"count": count})
+    def is_truthy(self, value):
+        # False, None, 0, empty string are false; everything else true
+        if value is None:
+            return False
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            return value != ""
+        return True
+
+# ---------- Main ----------
+def run_file(filename):
+    with open(filename, 'r', encoding='utf-8') as f:
+        source = f.read()
+    run_source(source)
+
+def run_source(source):
+    lexer = Lexer(source)
+    tokens = lexer.tokenize()
+    parser = Parser(tokens)
+    ast = parser.parse()
+    interpreter = Interpreter()
+    interpreter.eval(ast)
+
+def repl():
+    print("FranzCode REPL (type 'exit()' to quit)")
+    interpreter = Interpreter()
+    while True:
         try:
-            for i in range(count):
-                child = Environment(parent=env)
-                child.set("LOOPCOUNT", i + 1)
-                self._debug_log("H8", "loop_iter", {"iteration": i + 1})
-                self._exec_block(node.body, child)
-        except _BreakSignal:
-            self._debug_log("H8", "loop_breakout", {})
-            pass   # BREAKOUT exits the loop cleanly
-        self._debug_log("H8", "loop_end", {})
+            line = input('>>> ')
+            if line.strip() == 'exit()':
+                break
+            # For simplicity, treat each line as a full program (or statement)
+            run_source(line)
+        except (SyntaxError, NameError, RuntimeError) as e:
+            print(f"Error: {e}")
+        except KeyboardInterrupt:
+            print("\nGoodbye!")
+            break
 
-    def _exec_BreakoutNode(self, node: BreakoutNode, env):
-        raise _BreakSignal()
-
-    # ── Utility ───────────────────────────────────────────────
-    def _exec_WaitNode(self, node: WaitNode, env):
-        secs = float(self._eval(node.seconds, env))
-        time.sleep(secs)
-
-    def _exec_DumpNode(self, node: DumpNode, env):
-        all_vars = env.all_vars()
-        # Filter out builtins the user didn't set
-        user_vars = {k: v for k, v in all_vars.items()
-                     if k not in ("TRUE", "FALSE")}
-        print("┌─────── FRANZCODE VARIABLE DUMP ───────┐")
-        if user_vars:
-            for k, v in user_vars.items():
-                print(f"│  {k:<20} = {v!r}")
-        else:
-            print("│  (no variables set yet)")
-        print("└────────────────────────────────────────┘")
-
-    def _exec_StopNode(self, node: StopNode, env):
-        print("[FranzCode] Stopped by STOP.")
-        sys.exit(0)
-
-    # ── Troll 😈 ──────────────────────────────────────────────
-    def _exec_RickrollNode(self, node: RickrollNode, env):
-        print("♪ Never gonna give you up... ♪")
-        webbrowser.open("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
-
-    def _exec_MysteryNode(self, node: MysteryNode, env):
-        print(random.choice(self._MYSTERY_POOL))
-
-    def _exec_OopsNode(self, node: OopsNode, env):
-        print("\n💥 CRITICAL FRANZCODE FAILURE")
-        print("   Segmentation Fault (core dumped)")
-        print("   Just kidding. You've been OOPS'd. 😈\n")
-
-    def _exec_FlipNode(self, node: FlipNode, env):
-        result = random.choice(["HEADS 🪙", "TAILS 🪙"])
-        print(f"Coin flip: {result}")
-
-    def _exec_DiceNode(self, node: DiceNode, env):
-        val = random.randint(1, 6)
-        print(f"🎲 You rolled a {val}!")
-
-    def _exec_BruhNode(self, node: BruhNode, env):
-        print("bruh.")
-        time.sleep(1)
-
-    def _exec_PoggersNode(self, node: PoggersNode, env):
-        print(random.choice(self._POGGERS_POOL))
-
-    # ─── Top-level ProgramNode ────────────────────────────────
-    def _exec_ProgramNode(self, node: ProgramNode, env):
-        self._exec_block(node.body, env)
+if __name__ == '__main__':
+    if len(sys.argv) > 1:
+        run_file(sys.argv[1])
+    else:
+        repl()
