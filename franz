@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────
+#  franz  —  FranzCode Launcher (Linux / macOS)
+#
+#  INSTALL (one-time setup):
+#    chmod +x franz
+#    sudo cp franz /usr/local/bin/franz
+#    # OR add the franzcode/ folder to your PATH:
+#    echo 'export PATH="$PATH:/path/to/franzcode"' >> ~/.bashrc
+#    source ~/.bashrc
+#
+#  USAGE:
+#    franz                  → Interactive REPL
+#    franz myfile.franz     → Run a file
+#    franz --ast myfile.franz
+#    franz --tokens myfile.franz
+# ─────────────────────────────────────────────────────────────
+
+# Resolve the directory where this script lives
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Find Python 3 (try python3 first, then python)
+if command -v python3 &>/dev/null; then
+    PY=python3
+elif command -v python &>/dev/null; then
+    PY=python
+else
+    echo "💥  FranzCode requires Python 3. Install it from https://python.org"
+    exit 1
+fi
+
+# Check Python version >= 3.8
+PY_VER=$($PY -c "import sys; print(sys.version_info >= (3, 8))" 2>/dev/null)
+if [ "$PY_VER" != "True" ]; then
+    echo "💥  FranzCode requires Python 3.8 or higher."
+    exit 1
+fi
+
+exec "$PY" "$SCRIPT_DIR/main.py" "$@"

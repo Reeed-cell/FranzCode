@@ -1,0 +1,139 @@
+// ═══════════════════════════════════════════════
+//   demo.franz  —  Full FranzCode Feature Demo
+//   Run:  franz demo.franz
+// ═══════════════════════════════════════════════
+
+
+// ── 1. BASIC OUTPUT ─────────────────────────────
+SAY "═══════════════════════════════"
+SAY "  Welcome to FranzCode v1.0!"
+SAY "  The language built for chaos."
+SAY "═══════════════════════════════"
+SAY ""
+
+
+// ── 2. VARIABLES & MATH ──────────────────────────
+SET name  TO "Franz"
+SET score TO 100
+SET bonus TO 50
+
+SAY "Player: {name}"
+SAY "Base Score: {score}"
+
+ADD score BY bonus
+SAY "After bonus (+{bonus}): {score}"
+
+MUL score BY 2
+SAY "Doubled: {score}"
+
+SUB score BY 75
+SAY "After penalty (-75): {score}"
+
+DIV score BY 5
+SAY "Average: {score}"
+SAY ""
+
+
+// ── 3. MATH EXPRESSIONS ──────────────────────────
+SET a TO 8
+SET b TO 3
+SET sum     TO a + b
+SET product TO a * b
+SET power   TO a ** b
+
+SAY "{a} + {b} = {sum}"
+SAY "{a} * {b} = {product}"
+SAY "{a} ** {b} = {power}"
+SAY ""
+
+
+// ── 4. IF / ELSE ─────────────────────────────────
+SET level TO 7
+
+IF level > 5 THEN
+  SAY "High-level Franz user detected!"
+ELSE
+  SAY "Keep grinding, young Franz."
+ENDIF
+
+IF level == 10 THEN
+  YELL "MAX LEVEL REACHED"
+ELSE
+  WHISPER "not quite max level yet"
+ENDIF
+SAY ""
+
+
+// ── 5. NESTED IF ─────────────────────────────────
+SET temp TO 22
+
+IF temp > 30 THEN
+  SAY "It is HOT outside."
+ELSE
+  IF temp > 15 THEN
+    SAY "Nice weather today."
+  ELSE
+    SAY "Bundle up, it is cold!"
+  ENDIF
+ENDIF
+SAY ""
+
+
+// ── 6. LOOPS ────────────────────────────────────
+SAY "--- Countdown ---"
+SET n TO 5
+
+LOOP 5 TIMES
+  SAY "{n}..."
+  SUB n BY 1
+ENDLOOP
+SAY "BLASTOFF 🚀"
+SAY ""
+
+
+// ── 7. LOOP WITH LOOPCOUNT ───────────────────────
+SAY "--- Squares ---"
+LOOP 5 TIMES
+  SET sq TO LOOPCOUNT * LOOPCOUNT
+  SAY "{LOOPCOUNT} squared = {sq}"
+ENDLOOP
+SAY ""
+
+
+// ── 8. BREAKOUT ──────────────────────────────────
+SAY "--- Breakout Demo ---"
+LOOP 10 TIMES
+  SAY "Loop iteration {LOOPCOUNT}"
+  IF LOOPCOUNT == 3 THEN
+    SAY "Breaking out early!"
+    BREAKOUT
+  ENDIF
+ENDLOOP
+SAY ""
+
+
+// ── 9. OUTPUT STYLES ─────────────────────────────
+YELL "this is yelling"
+WHISPER "this is whispering"
+CONFUSE "this text will get scrambled"
+REPEAT "echo" 4 TIMES
+YEET "something awesome"
+SAY ""
+
+
+// ── 10. TROLL COMMANDS 😈 ────────────────────────
+SAY "--- Troll Zone ---"
+FLIP
+DICE
+MYSTERY
+BRUH
+POGGERS
+OOPS
+SAY ""
+
+
+// ── 11. DEBUG DUMP ───────────────────────────────
+DUMP
+
+SAY ""
+SAY "That's FranzCode. 🎉"
