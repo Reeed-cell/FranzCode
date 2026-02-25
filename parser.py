@@ -52,9 +52,39 @@ class Parser:
         self.tokens  = [t for t in tokens if t.type != TT.NEWLINE]
         self.pos     = 0
 
+    # ── Debug logging (for this session only) ───────────────────
+    def _debug_log(self, hypothesis_id: str, message: str, data: dict | None = None, run_id: str = "pre-fix"):
+        """Lightweight NDJSON logger for parser debugging."""
+        # region agent log
+        import json, time
+        payload = {
+            "sessionId": "40a6d3",
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+            "location": f"parser.py:{self._line}",
+            "message": message,
+            "data": data or {},
+            "timestamp": int(time.time() * 1000),
+        }
+        try:
+            with open("debug-40a6d3.log", "a", encoding="utf-8") as _f:
+                _f.write(json.dumps(payload) + "\n")
+        except OSError:
+            # Logging must never break parsing.
+            pass
+        # endregion
+
     # ── Token navigation ──────────────────────────────────────
     @property
     def _current(self) -> Token:
+        # defensive: if pos is beyond the tokens list, return an EOF token.
+        if self.pos >= len(self.tokens):
+            # return a synthetic EOF token using the final known line (if any)
+            if self.tokens:
+                last_line = self.tokens[-1].line
+            else:
+                last_line = 0
+            return Token(TT.EOF, None, line=last_line, col=0)
         return self.tokens[self.pos]
 
     @property
@@ -91,17 +121,24 @@ class Parser:
 
     # ── Public entry ──────────────────────────────────────────
     def parse(self) -> ProgramNode:
+        self._debug_log("H1", "parse_start", {"token_count": len(self.tokens)})
         body = []
         while not self._at_end():
             stmt = self._statement()
             if stmt is not None:
                 body.append(stmt)
+        self._debug_log("H1", "parse_end", {"stmt_count": len(body)})
         return ProgramNode(body=body, line=0)
 
     # ── Statement dispatcher ──────────────────────────────────
     def _statement(self) -> Optional[Node]:
         line = self._line
         tt   = self._current.type
+
+        self._debug_log("H2", "statement_dispatch", {
+            "token_type": tt.name,
+            "token_value": self._current.value,
+        })
 
         # ── Output ─────────────────────────────────────────
         if tt == TT.SAY:
@@ -188,12 +225,16 @@ class Parser:
         return YeetNode(expr=self._expr(), line=line)
 
     def _repeat(self, line) -> RepeatNode:
-        # REPEAT expr n TIMES
+        # REPEAT count TIMES ... ENDREPEAT (or similar)
         self.pos += 1
-        expr  = self._expr()
         count = self._expr()
         self._expect(TT.TIMES, "expected TIMES after count in REPEAT")
-        return RepeatNode(expr=expr, count=count, line=line)
+        self._debug_log("H3", "repeat_not_implemented", {"line": line})
+        # Grammar and AST shape for REPEAT are not finalized yet; failing loudly
+        # is better than silently ignoring or half‑parsing the construct.
+        raise ParseError(
+            f"[Line {line}] REPEAT/TIMES is not fully implemented yet in the parser."
+        )
 
     def _set(self, line) -> SetNode:
         # SET name TO expr
@@ -222,13 +263,23 @@ class Parser:
 
         # Collect THEN body until ELSE or ENDIF
         while not self._at_end() and not self._check(TT.ELSE, TT.ENDIF):
-            then_body.append(self._statement())
+            stmt = self._statement()
+            if stmt is None:
+                break
+            then_body.append(stmt)
 
         if self._match(TT.ELSE):
             while not self._at_end() and not self._check(TT.ENDIF):
-                else_body.append(self._statement())
+                stmt = self._statement()
+                if stmt is None:
+                    break
+                else_body.append(stmt)
 
         self._expect(TT.ENDIF, "expected ENDIF to close IF block")
+        self._debug_log("H4", "if_parsed", {
+            "then_len": len(then_body),
+            "else_len": len(else_body),
+        })
         return IfNode(condition=condition, then_body=then_body, else_body=else_body, line=line)
 
     def _loop(self, line) -> LoopNode:
@@ -242,6 +293,9 @@ class Parser:
             body.append(self._statement())
 
         self._expect(TT.ENDLOOP, "expected ENDLOOP to close LOOP block")
+        self._debug_log("H4", "loop_parsed", {
+            "body_len": len(body),
+        })
         return LoopNode(count=count, body=body, line=line)
 
     def _wait(self, line) -> WaitNode:
@@ -329,6 +383,10 @@ class Parser:
             self._expect(TT.RPAREN, "expected ')' to close grouped expression")
             return inner
 
+        self._debug_log("H5", "primary_unexpected_token", {
+            "token_type": tok.type.name,
+            "token_value": tok.value,
+        })
         raise ParseError(
             f"[Line {line}] Unexpected token '{tok.value}' ({tok.type.name}) "
             f"in expression — expected a number, string, or variable name."

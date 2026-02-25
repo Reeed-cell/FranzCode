@@ -129,13 +129,41 @@ class Interpreter:
         self.global_env.set("PI",    3.141592653589793)
         self.global_env.set("TAU",   6.283185307179586)
 
+    # ── Debug logging (for this session only) ───────────────────
+    def _debug_log(self, hypothesis_id: str, message: str, data: dict | None = None, run_id: str = "pre-fix"):
+        """Lightweight NDJSON logger for interpreter debugging."""
+        # region agent log
+        import json, time
+        payload = {
+            "sessionId": "40a6d3",
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+            "location": "interpreter.py",
+            "message": message,
+            "data": data or {},
+            "timestamp": int(time.time() * 1000),
+        }
+        try:
+            with open("debug-40a6d3.log", "a", encoding="utf-8") as _f:
+                _f.write(json.dumps(payload) + "\n")
+        except OSError:
+            # Logging must never break execution.
+            pass
+        # endregion
+
     # ── Public entry ──────────────────────────────────────────
     def run(self, node: ProgramNode):
+        self._debug_log("H6", "run_start", {"stmt_count": len(node.body)})
         self._exec_block(node.body, self.global_env)
+        self._debug_log("H6", "run_end", {})
 
     # ── Block execution ───────────────────────────────────────
     def _exec_block(self, stmts: List[Node], env: Environment):
-        for stmt in stmts:
+        for idx, stmt in enumerate(stmts):
+            self._debug_log("H7", "exec_block_stmt", {
+                "index": idx,
+                "node_type": type(stmt).__name__,
+            })
             self._exec(stmt, env)
 
     # ── Node dispatcher ───────────────────────────────────────
@@ -285,13 +313,17 @@ class Interpreter:
     # ── Loops ─────────────────────────────────────────────────
     def _exec_LoopNode(self, node: LoopNode, env):
         count = int(self._eval(node.count, env))
+        self._debug_log("H8", "loop_start", {"count": count})
         try:
             for i in range(count):
                 child = Environment(parent=env)
                 child.set("LOOPCOUNT", i + 1)
+                self._debug_log("H8", "loop_iter", {"iteration": i + 1})
                 self._exec_block(node.body, child)
         except _BreakSignal:
+            self._debug_log("H8", "loop_breakout", {})
             pass   # BREAKOUT exits the loop cleanly
+        self._debug_log("H8", "loop_end", {})
 
     def _exec_BreakoutNode(self, node: BreakoutNode, env):
         raise _BreakSignal()
